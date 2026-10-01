@@ -3,16 +3,18 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { getSupabase } from "@/lib/supabase";
-import { CHANNEL_NAME, SYNC_BUFFER_MS } from "@/lib/constants";
-import VideoPlayer from "@/components/VideoPlayer";
-import type { HostAction } from "@/components/VideoPlayer";
-import ParticipantList from "@/components/ParticipantList";
+import { CHANNEL_NAME } from "@/lib/constants";
+import VideoPlayer, { SyncPayload } from "@/components/VideoPlayer";
+import ParticipantList, { Participant } from "@/components/ParticipantList";
+import LiveChat, { ChatMessage } from "@/components/LiveChat";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 
-interface Participant {
-  name: string;
-  isHost: boolean;
-}
+const formatTimeShort = (seconds: number) => {
+  if (!seconds || isNaN(seconds) || !isFinite(seconds)) return "0:00";
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
+};
 
 export default function RoomPage() {
   const router = useRouter();
@@ -20,15 +22,68 @@ export default function RoomPage() {
   const [videoUrl, setVideoUrl] = useState<string>("");
   const [isHost, setIsHost] = useState(false);
   const [participants, setParticipants] = useState<Participant[]>([]);
-  const [hostTaken, setHostTaken] = useState(false);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [activeTab, setActiveTab] = useState<"chat" | "participants">("chat");
+
   const channelRef = useRef<RealtimeChannel | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+
+  // Keep a ref to latest isHost to avoid stale closures in callbacks
+  const isHostRef = useRef(isHost);
+  useEffect(() => {
+    isHostRef.current = isHost;
+  }, [isHost]);
+
+  const usernameRef = useRef(username);
+  useEffect(() => {
+    usernameRef.current = username;
+  }, [username]);
+
+  // Handle participant sync & single-host enforcement
+  const handlePresenceUpdate = useCallback((channel: RealtimeChannel) => {
+    const presenceState = channel.presenceState();
+    const users: Participant[] = [];
+    const myName = usernameRef.current;
+
+    Object.values(presenceState).forEach((presences) => {
+      (
+        presences as unknown as Array<{ name: string; isHost: boolean }>
+      ).forEach((p) => {
+        if (p?.name) {
+          users.push({ name: p.name, isHost: Boolean(p.isHost) });
+        }
+      });
+    });
+
+    setParticipants(users);
+
+    // Single host enforcement:
+    // Check if there is currently any host in the room
+    const currentHost = users.find((u) => u.isHost);
+
+    if (currentHost) {
+      // If someone else is host, ensure I am not host
+      if (currentHost.name !== myName && isHostRef.current) {
+        setIsHost(false);
+        channel.track({ name: myName, isHost: false });
+      } else if (currentHost.name === myName && !isHostRef.current) {
+        setIsHost(true);
+      }
+    } else {
+      // No host in room at all. If I wanted host or I am the only one, become host!
+      const wantsHost = sessionStorage.getItem("syncwatch_wants_host") === "true";
+      if (wantsHost || users.length === 1) {
+        setIsHost(true);
+        channel.track({ name: myName, isHost: true });
+      }
+    }
+  }, []);
 
   useEffect(() => {
     const storedUsername = sessionStorage.getItem("syncwatch_username");
     const storedVideoUrl = sessionStorage.getItem("syncwatch_video_url");
     const storedRoomId = sessionStorage.getItem("syncwatch_room_id");
-    let wantsHost = sessionStorage.getItem("syncwatch_is_host") === "true";
+    const wantsHost = sessionStorage.getItem("syncwatch_wants_host") === "true";
 
     if (!storedUsername || !storedVideoUrl || !storedRoomId) {
       router.push("/");
@@ -38,76 +93,104 @@ export default function RoomPage() {
     setUsername(storedUsername);
     setVideoUrl(storedVideoUrl);
 
-    // IMPORTANT: self: false — host does NOT receive own broadcasts
-    // Host controls their video directly, broadcasts only go to spectators
+    // Initial default message
+    setMessages([
+      {
+        id: "welcome",
+        sender: "Sistema",
+        text: `¡Bienvenido ${storedUsername}! Conectado a la sala.`,
+        isHost: false,
+        isSystem: true,
+        timestamp: Date.now(),
+      },
+    ]);
+
+    // Connect to Supabase Realtime channel
     const channel = getSupabase().channel(`${CHANNEL_NAME}:${storedRoomId}`, {
       config: { broadcast: { self: false } },
     });
 
     channel
+      // Presence Sync
       .on("presence", { event: "sync" }, () => {
-        const presenceState = channel.presenceState();
-        const users: Participant[] = [];
-        Object.values(presenceState).forEach((presences) => {
-          (
-            presences as unknown as Array<{ name: string; isHost: boolean }>
-          ).forEach((p) => {
-            users.push({ name: p.name, isHost: p.isHost });
-          });
-        });
-        setParticipants(users);
+        handlePresenceUpdate(channel);
+      })
+      .on("presence", { event: "join" }, ({ newPresences }) => {
+        handlePresenceUpdate(channel);
 
-        // Check if someone else is already host
-        const otherHosts = users.filter(
-          (u) => u.isHost && u.name !== storedUsername
-        );
-        if (otherHosts.length > 0 && wantsHost) {
-          // Another host exists — force this user to spectator
-          wantsHost = false;
-          setIsHost(false);
-          setHostTaken(true);
-          sessionStorage.setItem("syncwatch_is_host", "false");
-          channel.track({ name: storedUsername, isHost: false });
+        // If I am host, send current video state to the newcomer so they are in sync instantly
+        if (isHostRef.current && videoRef.current) {
+          const video = videoRef.current;
+          channel.send({
+            type: "broadcast",
+            event: "video-sync",
+            payload: {
+              action: "SEEK",
+              currentTime: video.currentTime,
+              isPlaying: !video.paused,
+              sentAt: Date.now(),
+              sender: usernameRef.current,
+            },
+          });
         }
       })
-      .on(
-        "broadcast",
-        { event: "video-sync" },
-        ({
-          payload,
-        }: {
-          payload: { action: HostAction; time: number; sync_at: number };
-        }) => {
-          // Spectators: wait until sync_at to execute (ensures all are in sync)
-          const video = videoRef.current;
-          if (!video) return;
+      .on("presence", { event: "leave" }, () => {
+        handlePresenceUpdate(channel);
+      })
 
-          const delay = Math.max(0, payload.sync_at - Date.now());
+      // Immediate Video Sync (0-50ms)
+      .on("broadcast", { event: "video-sync" }, ({ payload }: { payload: SyncPayload & { sender?: string } }) => {
+        const video = videoRef.current;
+        if (!video) return;
 
-          setTimeout(() => {
-            switch (payload.action) {
-              case "PLAY":
-                video.currentTime = payload.time;
-                video.play().catch(console.error);
-                break;
-              case "PAUSE":
-                video.pause();
-                video.currentTime = payload.time;
-                break;
-              case "SEEK":
-                video.currentTime = payload.time;
-                break;
-            }
-          }, delay);
+        // If by any chance I am the host who sent this, ignore
+        if (isHostRef.current) return;
+
+        const { currentTime, isPlaying, sentAt, action, sender } = payload;
+
+        // Calculate network transmission time (typically 20-50ms)
+        const networkLag = Math.max(0, (Date.now() - sentAt) / 1000);
+        const targetTime = isPlaying ? currentTime + networkLag : currentTime;
+
+        // Sync playback position
+        const timeDiff = Math.abs(video.currentTime - targetTime);
+
+        // Only seek if difference is noticeable (> 150ms) to avoid micro-stuttering
+        if (timeDiff > 0.15 || action === "SEEK" || action === "RESTART") {
+          video.currentTime = targetTime;
         }
-      )
+
+        // Sync playback state
+        if (isPlaying && video.paused) {
+          video.play().catch(console.error);
+        } else if (!isPlaying && !video.paused) {
+          video.pause();
+        }
+
+        // Add system message on seek/restart if needed
+        if (action === "RESTART") {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `sys-${Date.now()}`,
+              sender: "Sistema",
+              text: `👑 ${sender || "El anfitrión"} reinició el video.`,
+              isHost: false,
+              isSystem: true,
+              timestamp: Date.now(),
+            },
+          ]);
+        }
+      })
+
+      // Live Chat Broadcast
+      .on("broadcast", { event: "chat-message" }, ({ payload }: { payload: ChatMessage }) => {
+        setMessages((prev) => [...prev, payload]);
+      })
+
       .subscribe(async (status) => {
         if (status === "SUBSCRIBED") {
-          setIsHost(wantsHost);
-          await channel.track({
-            name: storedUsername,
-            isHost: wantsHost,
-          });
+          await channel.track({ name: storedUsername, isHost: wantsHost });
         }
       });
 
@@ -116,96 +199,267 @@ export default function RoomPage() {
     return () => {
       channel.unsubscribe();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [handlePresenceUpdate, router]);
 
-  // Host action handler — broadcasts with sync_at timestamp
-  // Host controls their video directly (0 delay for host)
-  // Spectators all execute at sync_at (perfectly synchronized with each other)
-  const handleHostAction = useCallback(
-    (action: HostAction, currentTime: number) => {
+  // Host Action Handler: Broadcasts immediately (< 50ms)
+  const handleHostSync = useCallback((payload: SyncPayload) => {
+    if (!isHostRef.current) return;
+
+    channelRef.current?.send({
+      type: "broadcast",
+      event: "video-sync",
+      payload: {
+        ...payload,
+        sender: usernameRef.current,
+      },
+    });
+
+    // Optionally notify chat of major actions
+    if (payload.action === "SEEK") {
+      const timeStr = formatTimeShort(payload.currentTime);
+      const systemMsg: ChatMessage = {
+        id: `seek-${Date.now()}`,
+        sender: "Sistema",
+        text: `👑 ${usernameRef.current} saltó a ${timeStr}`,
+        isHost: false,
+        isSystem: true,
+        timestamp: Date.now(),
+      };
+      setMessages((prev) => [...prev, systemMsg]);
       channelRef.current?.send({
         type: "broadcast",
-        event: "video-sync",
-        payload: {
-          action,
-          time: currentTime,
-          sync_at: Date.now() + SYNC_BUFFER_MS,
-        },
+        event: "chat-message",
+        payload: systemMsg,
+      });
+    }
+  }, []);
+
+  // Claim Host role if available
+  const handleClaimHost = useCallback(async () => {
+    const hasAnyHost = participants.some((p) => p.isHost && p.name !== username);
+    if (hasAnyHost) return;
+
+    setIsHost(true);
+    await channelRef.current?.track({ name: username, isHost: true });
+
+    const msg: ChatMessage = {
+      id: `claim-${Date.now()}`,
+      sender: "Sistema",
+      text: `👑 ${username} ahora es el anfitrión de la sala.`,
+      isHost: false,
+      isSystem: true,
+      timestamp: Date.now(),
+    };
+    setMessages((prev) => [...prev, msg]);
+    channelRef.current?.send({
+      type: "broadcast",
+      event: "chat-message",
+      payload: msg,
+    });
+  }, [participants, username]);
+
+  // Relinquish Host role
+  const handleRelinquishHost = useCallback(async () => {
+    setIsHost(false);
+    await channelRef.current?.track({ name: username, isHost: false });
+
+    const msg: ChatMessage = {
+      id: `relinquish-${Date.now()}`,
+      sender: "Sistema",
+      text: `${username} dejó de ser anfitrión. El rol está disponible.`,
+      isHost: false,
+      isSystem: true,
+      timestamp: Date.now(),
+    };
+    setMessages((prev) => [...prev, msg]);
+    channelRef.current?.send({
+      type: "broadcast",
+      event: "chat-message",
+      payload: msg,
+    });
+  }, [username]);
+
+  // Send Chat Message
+  const handleSendMessage = useCallback(
+    (text: string) => {
+      const newMsg: ChatMessage = {
+        id: `${username}-${Date.now()}`,
+        sender: username,
+        text,
+        isHost,
+        timestamp: Date.now(),
+      };
+
+      // Add locally immediately
+      setMessages((prev) => [...prev, newMsg]);
+
+      // Broadcast to others
+      channelRef.current?.send({
+        type: "broadcast",
+        event: "chat-message",
+        payload: newMsg,
       });
     },
-    []
+    [username, isHost]
   );
+
+  const handleLeaveRoom = () => {
+    sessionStorage.clear();
+    router.push("/");
+  };
 
   if (!username) {
     return (
       <div className="min-h-screen bg-black flex items-center justify-center">
-        <div className="animate-spin h-8 w-8 border-2 border-purple-500 border-t-transparent rounded-full" />
+        <div className="flex flex-col items-center gap-3">
+          <div className="animate-spin h-8 w-8 border-2 border-purple-500 border-t-transparent rounded-full" />
+          <p className="text-zinc-500 text-xs">Cargando sala...</p>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-black flex flex-col">
-      {/* Header */}
-      <header className="flex items-center justify-between px-6 py-4 border-b border-white/10 bg-black/50 backdrop-blur-sm">
-        <h1 className="text-xl font-bold text-white">
-          🎬 <span className="text-purple-400">Sync</span>Watch
-        </h1>
+    <div className="min-h-screen bg-black text-white flex flex-col selection:bg-purple-500 selection:text-white">
+      {/* Top Header */}
+      <header className="h-16 px-4 lg:px-6 border-b border-white/10 bg-black/60 backdrop-blur-xl flex items-center justify-between shrink-0 z-40">
         <div className="flex items-center gap-3">
-          {isHost && (
-            <span className="px-2 py-1 rounded-full bg-yellow-500/20 text-yellow-400 text-xs font-semibold">
-              👑 Anfitrión
-            </span>
+          <h1 className="text-lg font-black tracking-tight flex items-center gap-1.5">
+            <span>🎬</span>
+            <span className="text-purple-400">Sync</span>
+            <span>Watch</span>
+          </h1>
+          <span className="hidden sm:inline-block w-1.5 h-1.5 rounded-full bg-zinc-700" />
+          <span className="hidden sm:inline-block text-xs text-zinc-400 font-mono">
+            {participants.length}/4 en la sala
+          </span>
+        </div>
+
+        <div className="flex items-center gap-3">
+          {/* Role badge */}
+          {isHost ? (
+            <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-yellow-500/10 border border-yellow-500/30 text-yellow-300 text-xs font-semibold shadow-sm shadow-yellow-500/10">
+              <span>👑</span>
+              <span>Anfitrión</span>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/5 border border-white/10 text-zinc-400 text-xs font-medium">
+              <span>👁</span>
+              <span>Espectador</span>
+            </div>
           )}
-          <div className="flex items-center gap-2 text-sm text-zinc-400">
-            <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-            <span>{username}</span>
+
+          {/* User badge */}
+          <div className="flex items-center gap-2 pl-2 border-l border-white/10 text-xs text-zinc-300">
+            <span className="w-2 h-2 rounded-full bg-green-500" />
+            <span className="font-medium truncate max-w-[120px]">{username}</span>
           </div>
+
+          {/* Exit Button */}
+          <button
+            type="button"
+            onClick={handleLeaveRoom}
+            className="p-1.5 text-zinc-500 hover:text-red-400 hover:bg-white/5 rounded-lg transition-colors text-xs"
+            title="Salir de la sala"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+            </svg>
+          </button>
         </div>
       </header>
 
-      {/* Host taken alert */}
-      {hostTaken && (
-        <div className="mx-6 mt-4 p-3 rounded-xl bg-yellow-500/10 border border-yellow-500/20 text-yellow-400 text-sm text-center">
-          ⚠️ Ya hay un anfitrión en la sala. Entraste como espectador.
-        </div>
-      )}
+      {/* Main Layout Area */}
+      <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
+        {/* Video Column */}
+        <main className="flex-1 flex flex-col items-center justify-center p-3 sm:p-6 lg:p-8 bg-[#070707] overflow-y-auto">
+          <div className="w-full max-w-5xl flex flex-col items-center gap-4">
+            <VideoPlayer
+              ref={videoRef}
+              src={videoUrl}
+              isHost={isHost}
+              onHostSync={handleHostSync}
+            />
 
-      {/* Main */}
-      <div className="flex-1 flex flex-col lg:flex-row">
-        {/* Video area */}
-        <div className="flex-1 relative flex items-center justify-center p-4 lg:p-8">
-          <VideoPlayer
-            ref={videoRef}
-            src={videoUrl}
-            isHost={isHost}
-            onHostAction={handleHostAction}
-          />
-        </div>
-
-        {/* Sidebar */}
-        <aside className="w-full lg:w-80 border-t lg:border-t-0 lg:border-l border-white/10 p-6 flex flex-col gap-6 bg-black/30">
-          <ParticipantList participants={participants} />
-
-          {isHost ? (
-            <div className="p-4 rounded-xl bg-yellow-500/5 border border-yellow-500/20 text-center">
-              <p className="text-yellow-400 text-sm font-medium">
-                👑 Sos el anfitrión
-              </p>
-              <p className="text-zinc-500 text-xs mt-1">
-                Controlá el video libremente. Todo lo que hagas se refleja en
-                los espectadores al instante.
+            {/* Subtitle / Helper Info Bar */}
+            <div className="w-full flex items-center justify-between text-xs text-zinc-500 px-2">
+              <div className="flex items-center gap-2">
+                {isHost ? (
+                  <p className="flex items-center gap-1.5 text-yellow-300/80">
+                    <span>👑</span>
+                    <span>Tus acciones se transmiten en tiempo real sin delay.</span>
+                  </p>
+                ) : (
+                  <p className="flex items-center gap-1.5 text-zinc-400">
+                    <span>👁</span>
+                    <span>Reproducción sincronizada con el anfitrión.</span>
+                  </p>
+                )}
+              </div>
+              <p className="hidden sm:block text-zinc-600">
+                Atajos: Espacio (Play/Pausa) · J/L (±10s) · M (Mute) · F (Fullscreen)
               </p>
             </div>
-          ) : (
-            <div className="p-4 rounded-xl bg-white/5 border border-white/10 text-center">
-              <p className="text-zinc-400 text-sm">👁 Modo espectador</p>
-              <p className="text-zinc-600 text-xs mt-1">
-                El anfitrión controla el video
-              </p>
-            </div>
-          )}
+          </div>
+        </main>
+
+        {/* Sidebar: Chat & Participants */}
+        <aside className="w-full lg:w-96 border-t lg:border-t-0 lg:border-l border-white/10 flex flex-col bg-[#0b0b0e] h-[450px] lg:h-auto shrink-0">
+          {/* Tab Selector */}
+          <div className="p-2 border-b border-white/10 flex items-center gap-1 bg-black/40">
+            <button
+              type="button"
+              onClick={() => setActiveTab("chat")}
+              className={`flex-1 py-2 px-3 rounded-xl text-xs font-semibold transition-all flex items-center justify-center gap-1.5 ${
+                activeTab === "chat"
+                  ? "bg-purple-600 text-white shadow-md shadow-purple-600/20"
+                  : "text-zinc-400 hover:text-white hover:bg-white/5"
+              }`}
+            >
+              <span>💬</span>
+              <span>Chat en Vivo</span>
+              {messages.length > 0 && (
+                <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-white/20">
+                  {messages.length}
+                </span>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab("participants")}
+              className={`flex-1 py-2 px-3 rounded-xl text-xs font-semibold transition-all flex items-center justify-center gap-1.5 ${
+                activeTab === "participants"
+                  ? "bg-purple-600 text-white shadow-md shadow-purple-600/20"
+                  : "text-zinc-400 hover:text-white hover:bg-white/5"
+              }`}
+            >
+              <span>👥</span>
+              <span>Conectados</span>
+              <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-white/20">
+                {participants.length}
+              </span>
+            </button>
+          </div>
+
+          {/* Tab Contents */}
+          <div className="flex-1 p-3 overflow-hidden flex flex-col">
+            {activeTab === "chat" ? (
+              <LiveChat
+                messages={messages}
+                onSendMessage={handleSendMessage}
+                currentUsername={username}
+                isHost={isHost}
+              />
+            ) : (
+              <ParticipantList
+                participants={participants}
+                currentUsername={username}
+                isHost={isHost}
+                onClaimHost={handleClaimHost}
+                onRelinquishHost={handleRelinquishHost}
+              />
+            )}
+          </div>
         </aside>
       </div>
     </div>

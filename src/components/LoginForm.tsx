@@ -8,7 +8,7 @@ export default function LoginForm() {
   const router = useRouter();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [isHost, setIsHost] = useState(false);
+  const [wantsHost, setWantsHost] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -39,7 +39,7 @@ export default function LoginForm() {
       sessionStorage.setItem("syncwatch_username", username.trim());
       sessionStorage.setItem("syncwatch_video_url", data.video_url);
       sessionStorage.setItem("syncwatch_room_id", data.id);
-      sessionStorage.setItem("syncwatch_is_host", isHost ? "true" : "false");
+      sessionStorage.setItem("syncwatch_wants_host", wantsHost ? "true" : "false");
 
       router.push("/room");
     } catch {
@@ -49,11 +49,11 @@ export default function LoginForm() {
   };
 
   return (
-    <form onSubmit={handleSubmit} className="w-full max-w-sm space-y-6">
+    <form onSubmit={handleSubmit} className="w-full max-w-sm space-y-5">
       <div>
         <label
           htmlFor="username"
-          className="block text-sm font-medium text-zinc-400 mb-2"
+          className="block text-sm font-medium text-zinc-300 mb-2"
         >
           Tu nombre
         </label>
@@ -62,7 +62,8 @@ export default function LoginForm() {
           type="text"
           value={username}
           onChange={(e) => setUsername(e.target.value)}
-          placeholder="¿Cómo te llamas?"
+          placeholder="Ej: Nico, Franco..."
+          maxLength={20}
           className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all"
           autoFocus
         />
@@ -71,7 +72,7 @@ export default function LoginForm() {
       <div>
         <label
           htmlFor="password"
-          className="block text-sm font-medium text-zinc-400 mb-2"
+          className="block text-sm font-medium text-zinc-300 mb-2"
         >
           Contraseña de la sala
         </label>
@@ -85,42 +86,36 @@ export default function LoginForm() {
         />
       </div>
 
-      {/* Host toggle */}
-      <button
-        type="button"
-        onClick={() => setIsHost(!isHost)}
-        className={`w-full flex items-center gap-3 p-4 rounded-xl border transition-all duration-300 ${
-          isHost
-            ? "bg-yellow-500/10 border-yellow-500/30 text-yellow-400"
-            : "bg-white/5 border-white/10 text-zinc-500 hover:border-white/20"
+      {/* Host Option Checkbox */}
+      <div
+        onClick={() => setWantsHost(!wantsHost)}
+        className={`flex items-center gap-3 p-3.5 rounded-xl border cursor-pointer select-none transition-all ${
+          wantsHost
+            ? "bg-yellow-500/10 border-yellow-500/30 text-yellow-300"
+            : "bg-white/[0.02] border-white/10 text-zinc-400 hover:border-white/20"
         }`}
       >
-        <span className="text-xl">{isHost ? "👑" : "👁"}</span>
-        <div className="text-left flex-1">
-          <p className="text-sm font-medium">
-            {isHost ? "Soy el anfitrión" : "Soy espectador"}
-          </p>
-          <p className="text-xs opacity-60">
-            {isHost
-              ? "Yo controlo el video para todos"
-              : "Alguien más controla el video"}
-          </p>
-        </div>
         <div
-          className={`w-10 h-6 rounded-full relative transition-colors duration-300 ${
-            isHost ? "bg-yellow-500" : "bg-zinc-700"
+          className={`w-5 h-5 rounded-md flex items-center justify-center border transition-all ${
+            wantsHost
+              ? "bg-yellow-500 border-yellow-500 text-black font-bold text-xs"
+              : "border-zinc-600"
           }`}
         >
-          <div
-            className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-transform duration-300 ${
-              isHost ? "translate-x-5" : "translate-x-1"
-            }`}
-          />
+          {wantsHost && "✓"}
         </div>
-      </button>
+        <div className="flex-1">
+          <p className="text-xs font-semibold text-white flex items-center gap-1.5">
+            <span>👑</span> Quiero ser Anfitrión
+          </p>
+          <p className="text-[11px] text-zinc-500">
+            Controlarás el video si la sala no tiene otro anfitrión activo
+          </p>
+        </div>
+      </div>
 
       {error && (
-        <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm text-center">
+        <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-xs text-center font-medium">
           {error}
         </div>
       )}
@@ -128,10 +123,10 @@ export default function LoginForm() {
       <button
         type="submit"
         disabled={loading}
-        className="w-full py-4 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-lg transition-all duration-300 hover:scale-105 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100"
+        className="w-full py-3.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white font-bold text-base transition-all duration-200 hover:scale-[1.02] active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-purple-600/30 flex items-center justify-center gap-2"
       >
         {loading ? (
-          <span className="flex items-center justify-center gap-2">
+          <>
             <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
               <circle
                 className="opacity-25"
@@ -148,10 +143,10 @@ export default function LoginForm() {
                 d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
               />
             </svg>
-            Conectando...
-          </span>
+            <span>Verificando...</span>
+          </>
         ) : (
-          "CONECTAR"
+          <span>ENTRAR A LA SALA</span>
         )}
       </button>
     </form>
