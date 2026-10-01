@@ -8,6 +8,7 @@ export default function LoginForm() {
   const router = useRouter();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [isHost, setIsHost] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -35,10 +36,10 @@ export default function LoginForm() {
         return;
       }
 
-      // Store session data
       sessionStorage.setItem("syncwatch_username", username.trim());
       sessionStorage.setItem("syncwatch_video_url", data.video_url);
       sessionStorage.setItem("syncwatch_room_id", data.id);
+      sessionStorage.setItem("syncwatch_is_host", isHost ? "true" : "false");
 
       router.push("/room");
     } catch {
@@ -83,6 +84,40 @@ export default function LoginForm() {
           className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all"
         />
       </div>
+
+      {/* Host toggle */}
+      <button
+        type="button"
+        onClick={() => setIsHost(!isHost)}
+        className={`w-full flex items-center gap-3 p-4 rounded-xl border transition-all duration-300 ${
+          isHost
+            ? "bg-yellow-500/10 border-yellow-500/30 text-yellow-400"
+            : "bg-white/5 border-white/10 text-zinc-500 hover:border-white/20"
+        }`}
+      >
+        <span className="text-xl">{isHost ? "👑" : "👁"}</span>
+        <div className="text-left flex-1">
+          <p className="text-sm font-medium">
+            {isHost ? "Soy el anfitrión" : "Soy espectador"}
+          </p>
+          <p className="text-xs opacity-60">
+            {isHost
+              ? "Yo controlo el video para todos"
+              : "Alguien más controla el video"}
+          </p>
+        </div>
+        <div
+          className={`w-10 h-6 rounded-full relative transition-colors duration-300 ${
+            isHost ? "bg-yellow-500" : "bg-zinc-700"
+          }`}
+        >
+          <div
+            className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-transform duration-300 ${
+              isHost ? "translate-x-5" : "translate-x-1"
+            }`}
+          />
+        </div>
+      </button>
 
       {error && (
         <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-sm text-center">

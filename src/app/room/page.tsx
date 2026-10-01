@@ -3,44 +3,33 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { getSupabase } from "@/lib/supabase";
-import { COUNTDOWN_SECONDS, CHANNEL_NAME } from "@/lib/constants";
+import { CHANNEL_NAME, SYNC_DELAY_MS } from "@/lib/constants";
 import VideoPlayer from "@/components/VideoPlayer";
-import Countdown from "@/components/Countdown";
+import type { HostAction } from "@/components/VideoPlayer";
 import ParticipantList from "@/components/ParticipantList";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 
 interface Participant {
   name: string;
-  ready: boolean;
+  isHost: boolean;
 }
-
-type RoomState = "waiting" | "countdown" | "playing";
 
 export default function RoomPage() {
   const router = useRouter();
   const [username, setUsername] = useState<string>("");
   const [videoUrl, setVideoUrl] = useState<string>("");
-  const [roomState, setRoomState] = useState<RoomState>("waiting");
+  const [isHost, setIsHost] = useState(false);
   const [participants, setParticipants] = useState<Participant[]>([]);
-  const [isReady, setIsReady] = useState(false);
-  const [playAt, setPlayAt] = useState<number | null>(null);
+  const [syncStatus, setSyncStatus] = useState<string | null>(null);
   const channelRef = useRef<RealtimeChannel | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
-  // Use a ref to track room state inside callbacks (avoids stale closure)
-  const roomStateRef = useRef<RoomState>("waiting");
   useEffect(() => {
-    roomStateRef.current = roomState;
-  }, [roomState]);
-
-  // Also track if we already sent a broadcast to avoid duplicates
-  const hasBroadcasted = useRef(false);
-
-  useEffect(() => {
-    // Check session
     const storedUsername = sessionStorage.getItem("syncwatch_username");
     const storedVideoUrl = sessionStorage.getItem("syncwatch_video_url");
     const storedRoomId = sessionStorage.getItem("syncwatch_room_id");
+    const storedIsHost =
+      sessionStorage.getItem("syncwatch_is_host") === "true";
 
     if (!storedUsername || !storedVideoUrl || !storedRoomId) {
       router.push("/");
@@ -49,8 +38,9 @@ export default function RoomPage() {
 
     setUsername(storedUsername);
     setVideoUrl(storedVideoUrl);
+    setIsHost(storedIsHost);
 
-    // Connect to Supabase Realtime channel
+    // Connect to Supabase Realtime
     const channel = getSupabase().channel(`${CHANNEL_NAME}:${storedRoomId}`, {
       config: { broadcast: { self: true } },
     });
@@ -59,31 +49,53 @@ export default function RoomPage() {
       .on("presence", { event: "sync" }, () => {
         const presenceState = channel.presenceState();
         const users: Participant[] = [];
-
         Object.values(presenceState).forEach((presences) => {
-          (presences as unknown as Array<{ name: string; ready: boolean }>).forEach(
-            (p) => {
-              users.push({ name: p.name, ready: p.ready });
-            }
-          );
+          (
+            presences as unknown as Array<{ name: string; isHost: boolean }>
+          ).forEach((p) => {
+            users.push({ name: p.name, isHost: p.isHost });
+          });
         });
-
         setParticipants(users);
       })
       .on(
         "broadcast",
-        { event: "start-video" },
-        ({ payload }: { payload: { play_at: number } }) => {
-          // Only accept the FIRST play_at — ignore subsequent broadcasts
-          if (roomStateRef.current === "waiting") {
-            setPlayAt(payload.play_at);
-            setRoomState("countdown");
-          }
+        { event: "video-sync" },
+        ({
+          payload,
+        }: {
+          payload: { action: HostAction; time: number; sync_at: number };
+        }) => {
+          const { action, time, sync_at } = payload;
+          const delay = Math.max(0, sync_at - Date.now());
+
+          setSyncStatus("Sincronizando...");
+
+          setTimeout(() => {
+            const video = videoRef.current;
+            if (!video) return;
+
+            switch (action) {
+              case "PLAY":
+                video.currentTime = time;
+                video.play().catch(console.error);
+                break;
+              case "PAUSE":
+                video.pause();
+                video.currentTime = time;
+                break;
+              case "SEEK":
+                video.currentTime = time;
+                break;
+            }
+
+            setSyncStatus(null);
+          }, delay);
         }
       )
       .subscribe(async (status) => {
         if (status === "SUBSCRIBED") {
-          await channel.track({ name: storedUsername, ready: false });
+          await channel.track({ name: storedUsername, isHost: storedIsHost });
         }
       });
 
@@ -95,43 +107,24 @@ export default function RoomPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Detect when ALL participants are ready → trigger countdown
-  useEffect(() => {
-    if (roomState !== "waiting") return;
-    if (participants.length === 0) return;
-    if (hasBroadcasted.current) return;
-
-    const allReady = participants.every((p) => p.ready);
-
-    if (allReady) {
-      hasBroadcasted.current = true;
-      const playAtTime = Date.now() + COUNTDOWN_SECONDS * 1000;
+  const handleHostAction = useCallback(
+    (action: HostAction, currentTime: number) => {
+      const syncAt = Date.now() + SYNC_DELAY_MS;
 
       channelRef.current?.send({
         type: "broadcast",
-        event: "start-video",
-        payload: { play_at: playAtTime },
+        event: "video-sync",
+        payload: {
+          action,
+          time: currentTime,
+          sync_at: syncAt,
+        },
       });
-    }
-  }, [participants, roomState]);
+    },
+    []
+  );
 
-  const handleReady = async () => {
-    if (isReady) return;
-    setIsReady(true);
-    await channelRef.current?.track({ name: username, ready: true });
-  };
-
-  const handleCountdownEnd = useCallback(() => {
-    setRoomState("playing");
-    if (videoRef.current) {
-      videoRef.current.currentTime = 0;
-      videoRef.current.play().catch((err) => {
-        console.error("Error al reproducir:", err);
-      });
-    }
-  }, []);
-
-  // Don't render until session is loaded
+  // Loading state
   if (!username) {
     return (
       <div className="min-h-screen bg-black flex items-center justify-center">
@@ -147,74 +140,57 @@ export default function RoomPage() {
         <h1 className="text-xl font-bold text-white">
           🎬 <span className="text-purple-400">Sync</span>Watch
         </h1>
-        <div className="flex items-center gap-2 text-sm text-zinc-400">
-          <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-          <span>{username}</span>
+        <div className="flex items-center gap-3">
+          {isHost && (
+            <span className="px-2 py-1 rounded-full bg-yellow-500/20 text-yellow-400 text-xs font-semibold">
+              👑 Anfitrión
+            </span>
+          )}
+          <div className="flex items-center gap-2 text-sm text-zinc-400">
+            <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+            <span>{username}</span>
+          </div>
         </div>
       </header>
 
-      {/* Main content */}
+      {/* Main */}
       <div className="flex-1 flex flex-col lg:flex-row">
         {/* Video area */}
         <div className="flex-1 relative flex items-center justify-center p-4 lg:p-8">
           <VideoPlayer
             ref={videoRef}
             src={videoUrl}
-            isPlaying={roomState === "playing"}
+            isHost={isHost}
+            onHostAction={handleHostAction}
           />
 
-          {/* Countdown overlay */}
-          {roomState === "countdown" && playAt && (
-            <div className="absolute inset-4 lg:inset-8">
-              <Countdown playAt={playAt} onComplete={handleCountdownEnd} />
+          {/* Sync indicator */}
+          {syncStatus && (
+            <div className="absolute top-8 left-1/2 -translate-x-1/2 px-4 py-2 rounded-full bg-purple-500/20 border border-purple-500/30 text-purple-300 text-sm font-medium animate-pulse z-50">
+              ⏳ {syncStatus}
             </div>
           )}
         </div>
 
         {/* Sidebar */}
         <aside className="w-full lg:w-80 border-t lg:border-t-0 lg:border-l border-white/10 p-6 flex flex-col gap-6 bg-black/30">
-          {/* Participant list */}
           <ParticipantList participants={participants} />
 
-          {/* Ready button */}
-          {roomState === "waiting" && (
-            <div className="space-y-3">
-              <button
-                onClick={handleReady}
-                disabled={isReady}
-                className={`w-full py-4 rounded-xl text-lg font-bold transition-all duration-300 ${
-                  isReady
-                    ? "bg-green-500/20 text-green-400 border-2 border-green-500/50 cursor-default"
-                    : "bg-purple-600 hover:bg-purple-500 text-white hover:scale-[1.02] active:scale-95 shadow-lg shadow-purple-500/25"
-                }`}
-              >
-                {isReady ? "✓ LISTO" : "🎬 LISTO, VER"}
-              </button>
-
-              {isReady && (
-                <p className="text-center text-sm text-zinc-500 animate-pulse">
-                  Esperando a que todos estén listos...
-                </p>
-              )}
+          {isHost ? (
+            <div className="p-4 rounded-xl bg-yellow-500/5 border border-yellow-500/20 text-center">
+              <p className="text-yellow-400 text-sm font-medium">
+                👑 Sos el anfitrión
+              </p>
+              <p className="text-zinc-500 text-xs mt-1">
+                Usá los controles del video. Todos ven lo que vos controlás.
+              </p>
             </div>
-          )}
-
-          {/* Playing indicator */}
-          {roomState === "playing" && (
-            <div className="flex items-center justify-center gap-2 py-4 rounded-xl bg-green-500/10 border border-green-500/20">
-              <div className="w-3 h-3 rounded-full bg-green-500 animate-pulse" />
-              <span className="text-green-400 font-semibold">
-                Reproduciendo
-              </span>
-            </div>
-          )}
-
-          {/* Countdown indicator */}
-          {roomState === "countdown" && (
-            <div className="flex items-center justify-center gap-2 py-4 rounded-xl bg-purple-500/10 border border-purple-500/20 animate-pulse">
-              <span className="text-purple-400 font-semibold">
-                ¡Preparando sync!
-              </span>
+          ) : (
+            <div className="p-4 rounded-xl bg-white/5 border border-white/10 text-center">
+              <p className="text-zinc-400 text-sm">👁 Modo espectador</p>
+              <p className="text-zinc-600 text-xs mt-1">
+                El anfitrión controla el video para todos
+              </p>
             </div>
           )}
         </aside>

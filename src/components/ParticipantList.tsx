@@ -2,7 +2,7 @@
 
 export interface Participant {
   name: string;
-  ready: boolean;
+  isHost: boolean;
 }
 
 interface ParticipantListProps {
@@ -27,30 +27,32 @@ export default function ParticipantList({
             <div
               key={`${p.name}-${i}`}
               className={`flex items-center gap-3 p-3 rounded-xl border transition-all duration-300 ${
-                p.ready
-                  ? "bg-green-500/5 border-green-500/20"
+                p.isHost
+                  ? "bg-yellow-500/5 border-yellow-500/20"
                   : "bg-white/5 border-white/10"
               }`}
             >
               <div className="relative">
                 <div
-                  className={`w-3 h-3 rounded-full transition-colors duration-300 ${
-                    p.ready ? "bg-green-500" : "bg-zinc-600"
+                  className={`w-3 h-3 rounded-full ${
+                    p.isHost ? "bg-yellow-500" : "bg-green-500"
                   }`}
                 />
-                {p.ready && (
-                  <div className="absolute inset-0 w-3 h-3 rounded-full bg-green-500 animate-ping opacity-75" />
-                )}
+                <div
+                  className={`absolute inset-0 w-3 h-3 rounded-full animate-ping opacity-75 ${
+                    p.isHost ? "bg-yellow-500" : "bg-green-500"
+                  }`}
+                />
               </div>
               <span className="text-sm text-white font-medium flex-1 truncate">
                 {p.name}
               </span>
               <span
-                className={`text-xs font-semibold uppercase tracking-wide transition-colors duration-300 ${
-                  p.ready ? "text-green-400" : "text-zinc-600"
+                className={`text-xs font-semibold uppercase tracking-wide ${
+                  p.isHost ? "text-yellow-400" : "text-zinc-500"
                 }`}
               >
-                {p.ready ? "✓ Listo" : "Esperando"}
+                {p.isHost ? "👑 Anfitrión" : "Espectador"}
               </span>
             </div>
           ))
