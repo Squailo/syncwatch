@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { getSupabase } from "@/lib/supabase";
-import { CHANNEL_NAME } from "@/lib/constants";
+import { CHANNEL_NAME, SYNC_BUFFER_MS } from "@/lib/constants";
 import VideoPlayer from "@/components/VideoPlayer";
 import type { HostAction } from "@/components/VideoPlayer";
 import ParticipantList from "@/components/ParticipantList";
@@ -76,25 +76,29 @@ export default function RoomPage() {
         ({
           payload,
         }: {
-          payload: { action: HostAction; time: number };
+          payload: { action: HostAction; time: number; sync_at: number };
         }) => {
-          // Spectators receive this and mirror the host's video
+          // Spectators: wait until sync_at to execute (ensures all are in sync)
           const video = videoRef.current;
           if (!video) return;
 
-          switch (payload.action) {
-            case "PLAY":
-              video.currentTime = payload.time;
-              video.play().catch(console.error);
-              break;
-            case "PAUSE":
-              video.pause();
-              video.currentTime = payload.time;
-              break;
-            case "SEEK":
-              video.currentTime = payload.time;
-              break;
-          }
+          const delay = Math.max(0, payload.sync_at - Date.now());
+
+          setTimeout(() => {
+            switch (payload.action) {
+              case "PLAY":
+                video.currentTime = payload.time;
+                video.play().catch(console.error);
+                break;
+              case "PAUSE":
+                video.pause();
+                video.currentTime = payload.time;
+                break;
+              case "SEEK":
+                video.currentTime = payload.time;
+                break;
+            }
+          }, delay);
         }
       )
       .subscribe(async (status) => {
@@ -115,13 +119,19 @@ export default function RoomPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Host action handler — broadcasts immediately to spectators (0 delay)
+  // Host action handler — broadcasts with sync_at timestamp
+  // Host controls their video directly (0 delay for host)
+  // Spectators all execute at sync_at (perfectly synchronized with each other)
   const handleHostAction = useCallback(
     (action: HostAction, currentTime: number) => {
       channelRef.current?.send({
         type: "broadcast",
         event: "video-sync",
-        payload: { action, time: currentTime },
+        payload: {
+          action,
+          time: currentTime,
+          sync_at: Date.now() + SYNC_BUFFER_MS,
+        },
       });
     },
     []
