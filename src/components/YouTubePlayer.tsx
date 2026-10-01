@@ -41,28 +41,35 @@ export default function YouTubePlayer({
       if (!window.YT || !window.YT.Player) return;
 
       if (playerRef.current) {
-        playerRef.current.destroy();
+        try {
+          playerRef.current.destroy();
+        } catch {
+          // ignore
+        }
       }
 
       playerRef.current = new window.YT.Player("youtube-iframe-target", {
         videoId,
         playerVars: {
-          autoplay: 0,
-          controls: isHost ? 1 : 0, // Viewers have native controls disabled to maintain sync
-          disablekb: isHost ? 0 : 1,
+          autoplay: 1, // Start playback upon loading
+          controls: 1, // Everyone gets controls: volume, CC subtitles, language, fullscreen
           rel: 0,
           modestbranding: 1,
           playsinline: 1,
+          enablejsapi: 1,
         },
         events: {
-          onReady: () => {
+          onReady: (event: any) => {
             setIsReady(true);
+            // If viewer, unmute or ensure volume is audible
+            event.target.playVideo?.();
           },
           onStateChange: (event: any) => {
+            // ONLY the host broadcasts sync actions to the room!
             if (!isHost || isSyncingFromRemote.current) return;
 
             const player = playerRef.current;
-            if (!player) return;
+            if (!player || !player.getCurrentTime) return;
 
             const time = player.getCurrentTime() || 0;
 
@@ -97,12 +104,16 @@ export default function YouTubePlayer({
 
     return () => {
       if (playerRef.current?.destroy) {
-        playerRef.current.destroy();
+        try {
+          playerRef.current.destroy();
+        } catch {
+          // ignore
+        }
       }
     };
   }, [videoId, isHost, onHostSync]);
 
-  // Periodic check for host seek operations
+  // Periodic check for host seek operations (when host drags the YouTube scrubber)
   useEffect(() => {
     if (!isHost) return;
 
@@ -112,7 +123,6 @@ export default function YouTubePlayer({
       if (!player || !player.getCurrentTime) return;
 
       const currentTime = player.getCurrentTime();
-      // If time jumped by more than 1.8 seconds while playing, it was likely a seek
       if (Math.abs(currentTime - lastKnownTime) > 1.8 && lastKnownTime > 0) {
         const isPlaying = player.getPlayerState() === window.YT?.PlayerState?.PLAYING;
         onHostSync?.({
@@ -139,7 +149,7 @@ export default function YouTubePlayer({
 
     isSyncingFromRemote.current = true;
 
-    const playerTime = player.getCurrentTime() || 0;
+    const playerTime = player.getCurrentTime?.() || 0;
     const diff = Math.abs(playerTime - targetTime);
 
     if (diff > 0.4 || action === "SEEK" || action === "RESTART") {
@@ -157,7 +167,7 @@ export default function YouTubePlayer({
     }, 400);
   }, []);
 
-  // Expose remote sync to parent via ref or window custom event
+  // Listen to remote sync events
   useEffect(() => {
     const handleRemoteEvent = (e: CustomEvent<SyncPayload>) => {
       if (!isHost) {
@@ -177,14 +187,6 @@ export default function YouTubePlayer({
       className="w-full max-w-5xl aspect-video bg-black rounded-2xl overflow-hidden shadow-2xl shadow-purple-500/10 ring-1 ring-white/10 relative group"
     >
       <div id="youtube-iframe-target" className="w-full h-full" />
-
-      {/* Viewer transparent touch blocker to prevent desync */}
-      {!isHost && (
-        <div
-          className="absolute inset-0 z-20 cursor-default"
-          title="El video está sincronizado con el anfitrión"
-        />
-      )}
 
       {/* Status Badges */}
       <div className="absolute top-4 left-4 flex items-center gap-2 pointer-events-none z-30">

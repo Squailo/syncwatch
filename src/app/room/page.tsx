@@ -332,6 +332,21 @@ export default function RoomPage() {
       },
     });
 
+    // Auto-play new video for everyone once loaded
+    setTimeout(() => {
+      channelRef.current?.send({
+        type: "broadcast",
+        event: "video-sync",
+        payload: {
+          action: "PLAY",
+          currentTime: 0,
+          isPlaying: true,
+          sentAt: Date.now(),
+          sender: username,
+        },
+      });
+    }, 700);
+
     // System announcement
     const changeNotice: ChatMessage = {
       id: `change-${Date.now()}`,
@@ -535,12 +550,14 @@ export default function RoomPage() {
           <div className="w-full max-w-5xl flex flex-col items-center gap-4">
             {youtubeVideoId ? (
               <YouTubePlayer
+                key={`yt-${youtubeVideoId}`}
                 videoId={youtubeVideoId}
                 isHost={isHost}
                 onHostSync={handleHostSync}
               />
             ) : (
               <VideoPlayer
+                key={`vid-${videoUrl}`}
                 ref={videoRef}
                 src={videoUrl}
                 subtitlesUrl={subtitlesUrl}
