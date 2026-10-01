@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { getSupabase } from "@/lib/supabase";
-import { CHANNEL_NAME, SYNC_DELAY_MS } from "@/lib/constants";
+import { CHANNEL_NAME } from "@/lib/constants";
 import VideoPlayer from "@/components/VideoPlayer";
 import type { HostAction } from "@/components/VideoPlayer";
 import ParticipantList from "@/components/ParticipantList";
@@ -20,7 +20,7 @@ export default function RoomPage() {
   const [videoUrl, setVideoUrl] = useState<string>("");
   const [isHost, setIsHost] = useState(false);
   const [participants, setParticipants] = useState<Participant[]>([]);
-  const [syncStatus, setSyncStatus] = useState<string | null>(null);
+  const [hostTaken, setHostTaken] = useState(false);
   const channelRef = useRef<RealtimeChannel | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
@@ -28,8 +28,7 @@ export default function RoomPage() {
     const storedUsername = sessionStorage.getItem("syncwatch_username");
     const storedVideoUrl = sessionStorage.getItem("syncwatch_video_url");
     const storedRoomId = sessionStorage.getItem("syncwatch_room_id");
-    const storedIsHost =
-      sessionStorage.getItem("syncwatch_is_host") === "true";
+    let wantsHost = sessionStorage.getItem("syncwatch_is_host") === "true";
 
     if (!storedUsername || !storedVideoUrl || !storedRoomId) {
       router.push("/");
@@ -38,11 +37,11 @@ export default function RoomPage() {
 
     setUsername(storedUsername);
     setVideoUrl(storedVideoUrl);
-    setIsHost(storedIsHost);
 
-    // Connect to Supabase Realtime
+    // IMPORTANT: self: false — host does NOT receive own broadcasts
+    // Host controls their video directly, broadcasts only go to spectators
     const channel = getSupabase().channel(`${CHANNEL_NAME}:${storedRoomId}`, {
-      config: { broadcast: { self: true } },
+      config: { broadcast: { self: false } },
     });
 
     channel
@@ -57,6 +56,19 @@ export default function RoomPage() {
           });
         });
         setParticipants(users);
+
+        // Check if someone else is already host
+        const otherHosts = users.filter(
+          (u) => u.isHost && u.name !== storedUsername
+        );
+        if (otherHosts.length > 0 && wantsHost) {
+          // Another host exists — force this user to spectator
+          wantsHost = false;
+          setIsHost(false);
+          setHostTaken(true);
+          sessionStorage.setItem("syncwatch_is_host", "false");
+          channel.track({ name: storedUsername, isHost: false });
+        }
       })
       .on(
         "broadcast",
@@ -64,38 +76,34 @@ export default function RoomPage() {
         ({
           payload,
         }: {
-          payload: { action: HostAction; time: number; sync_at: number };
+          payload: { action: HostAction; time: number };
         }) => {
-          const { action, time, sync_at } = payload;
-          const delay = Math.max(0, sync_at - Date.now());
+          // Spectators receive this and mirror the host's video
+          const video = videoRef.current;
+          if (!video) return;
 
-          setSyncStatus("Sincronizando...");
-
-          setTimeout(() => {
-            const video = videoRef.current;
-            if (!video) return;
-
-            switch (action) {
-              case "PLAY":
-                video.currentTime = time;
-                video.play().catch(console.error);
-                break;
-              case "PAUSE":
-                video.pause();
-                video.currentTime = time;
-                break;
-              case "SEEK":
-                video.currentTime = time;
-                break;
-            }
-
-            setSyncStatus(null);
-          }, delay);
+          switch (payload.action) {
+            case "PLAY":
+              video.currentTime = payload.time;
+              video.play().catch(console.error);
+              break;
+            case "PAUSE":
+              video.pause();
+              video.currentTime = payload.time;
+              break;
+            case "SEEK":
+              video.currentTime = payload.time;
+              break;
+          }
         }
       )
       .subscribe(async (status) => {
         if (status === "SUBSCRIBED") {
-          await channel.track({ name: storedUsername, isHost: storedIsHost });
+          setIsHost(wantsHost);
+          await channel.track({
+            name: storedUsername,
+            isHost: wantsHost,
+          });
         }
       });
 
@@ -107,24 +115,18 @@ export default function RoomPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Host action handler — broadcasts immediately to spectators (0 delay)
   const handleHostAction = useCallback(
     (action: HostAction, currentTime: number) => {
-      const syncAt = Date.now() + SYNC_DELAY_MS;
-
       channelRef.current?.send({
         type: "broadcast",
         event: "video-sync",
-        payload: {
-          action,
-          time: currentTime,
-          sync_at: syncAt,
-        },
+        payload: { action, time: currentTime },
       });
     },
     []
   );
 
-  // Loading state
   if (!username) {
     return (
       <div className="min-h-screen bg-black flex items-center justify-center">
@@ -153,6 +155,13 @@ export default function RoomPage() {
         </div>
       </header>
 
+      {/* Host taken alert */}
+      {hostTaken && (
+        <div className="mx-6 mt-4 p-3 rounded-xl bg-yellow-500/10 border border-yellow-500/20 text-yellow-400 text-sm text-center">
+          ⚠️ Ya hay un anfitrión en la sala. Entraste como espectador.
+        </div>
+      )}
+
       {/* Main */}
       <div className="flex-1 flex flex-col lg:flex-row">
         {/* Video area */}
@@ -163,13 +172,6 @@ export default function RoomPage() {
             isHost={isHost}
             onHostAction={handleHostAction}
           />
-
-          {/* Sync indicator */}
-          {syncStatus && (
-            <div className="absolute top-8 left-1/2 -translate-x-1/2 px-4 py-2 rounded-full bg-purple-500/20 border border-purple-500/30 text-purple-300 text-sm font-medium animate-pulse z-50">
-              ⏳ {syncStatus}
-            </div>
-          )}
         </div>
 
         {/* Sidebar */}
@@ -182,14 +184,15 @@ export default function RoomPage() {
                 👑 Sos el anfitrión
               </p>
               <p className="text-zinc-500 text-xs mt-1">
-                Usá los controles del video. Todos ven lo que vos controlás.
+                Controlá el video libremente. Todo lo que hagas se refleja en
+                los espectadores al instante.
               </p>
             </div>
           ) : (
             <div className="p-4 rounded-xl bg-white/5 border border-white/10 text-center">
               <p className="text-zinc-400 text-sm">👁 Modo espectador</p>
               <p className="text-zinc-600 text-xs mt-1">
-                El anfitrión controla el video para todos
+                El anfitrión controla el video
               </p>
             </div>
           )}
