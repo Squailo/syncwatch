@@ -5,9 +5,23 @@ import { useRouter } from "next/navigation";
 import { getSupabase } from "@/lib/supabase";
 import { CHANNEL_NAME } from "@/lib/constants";
 import VideoPlayer, { SyncPayload } from "@/components/VideoPlayer";
+import YouTubePlayer from "@/components/YouTubePlayer";
 import ParticipantList, { Participant } from "@/components/ParticipantList";
 import LiveChat, { ChatMessage } from "@/components/LiveChat";
 import type { RealtimeChannel } from "@supabase/supabase-js";
+
+function getYouTubeId(url: string): string | null {
+  if (!url) return null;
+  const match = url.trim().match(
+    /(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=))([\w-]{11})/
+  );
+  return match ? match[1] : null;
+}
+
+function normalizeMediaUrl(url: string): string {
+  if (!url) return "";
+  return url.trim().replace(/pixeldrain\.com\/u\/([a-zA-Z0-9_-]+)/i, "pixeldrain.com/api/file/$1");
+}
 
 const formatTimeShort = (seconds: number) => {
   if (!seconds || isNaN(seconds) || !isFinite(seconds)) return "0:00";
@@ -26,6 +40,10 @@ export default function RoomPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [activeTab, setActiveTab] = useState<"chat" | "participants">("chat");
 
+  // Host Change Video state
+  const [newVideoInput, setNewVideoInput] = useState("");
+  const [showChangeVideoModal, setShowChangeVideoModal] = useState(false);
+
   const channelRef = useRef<RealtimeChannel | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
@@ -39,6 +57,11 @@ export default function RoomPage() {
   useEffect(() => {
     usernameRef.current = username;
   }, [username]);
+
+  const videoUrlRef = useRef(videoUrl);
+  useEffect(() => {
+    videoUrlRef.current = videoUrl;
+  }, [videoUrl]);
 
   // Handle participant sync & single-host enforcement
   const handlePresenceUpdate = useCallback((channel: RealtimeChannel) => {
@@ -58,12 +81,9 @@ export default function RoomPage() {
 
     setParticipants(users);
 
-    // Single host enforcement:
-    // Check if there is currently any host in the room
     const currentHost = users.find((u) => u.isHost);
 
     if (currentHost) {
-      // If someone else is host, ensure I am not host
       if (currentHost.name !== myName && isHostRef.current) {
         setIsHost(false);
         channel.track({ name: myName, isHost: false });
@@ -71,7 +91,6 @@ export default function RoomPage() {
         setIsHost(true);
       }
     } else {
-      // No host in room at all. If I wanted host or I am the only one, become host!
       const wantsHost = sessionStorage.getItem("syncwatch_wants_host") === "true";
       if (wantsHost || users.length === 1) {
         setIsHost(true);
@@ -91,18 +110,13 @@ export default function RoomPage() {
       return;
     }
 
-function normalizeMediaUrl(url: string): string {
-  if (!url) return "";
-  return url.trim().replace(/pixeldrain\.com\/u\/([a-zA-Z0-9_-]+)/i, "pixeldrain.com/api/file/$1");
-}
-
     setUsername(storedUsername);
     setVideoUrl(normalizeMediaUrl(storedVideoUrl));
 
     const storedSubtitlesUrl = sessionStorage.getItem("syncwatch_subtitles_url") || "";
     setSubtitlesUrl(normalizeMediaUrl(storedSubtitlesUrl));
 
-    // Refresh room subtitles and video from DB if changed
+    // Refresh room video and subtitles from DB
     getSupabase()
       .from("rooms")
       .select("*")
@@ -142,63 +156,67 @@ function normalizeMediaUrl(url: string): string {
     });
 
     channel
-      // Presence Sync
       .on("presence", { event: "sync" }, () => {
         handlePresenceUpdate(channel);
       })
-      .on("presence", { event: "join" }, ({ newPresences }) => {
+      .on("presence", { event: "join" }, () => {
         handlePresenceUpdate(channel);
 
-        // If I am host, send current video state to the newcomer so they are in sync instantly
-        if (isHostRef.current && videoRef.current) {
-          const video = videoRef.current;
-          channel.send({
-            type: "broadcast",
-            event: "video-sync",
-            payload: {
-              action: "SEEK",
-              currentTime: video.currentTime,
-              isPlaying: !video.paused,
-              sentAt: Date.now(),
-              sender: usernameRef.current,
-            },
-          });
+        // If I am host, send current video state to newcomer
+        if (isHostRef.current) {
+          const ytId = getYouTubeId(videoUrlRef.current);
+          if (!ytId && videoRef.current) {
+            const video = videoRef.current;
+            channel.send({
+              type: "broadcast",
+              event: "video-sync",
+              payload: {
+                action: "SEEK",
+                currentTime: video.currentTime,
+                isPlaying: !video.paused,
+                sentAt: Date.now(),
+                sender: usernameRef.current,
+              },
+            });
+          }
         }
       })
       .on("presence", { event: "leave" }, () => {
         handlePresenceUpdate(channel);
       })
 
-      // Immediate Video Sync (0-50ms)
+      // Immediate Video Sync
       .on("broadcast", { event: "video-sync" }, ({ payload }: { payload: SyncPayload & { sender?: string } }) => {
+        if (isHostRef.current) return;
+
+        const ytId = getYouTubeId(videoUrlRef.current);
+
+        // If current video is YouTube, forward to YouTubePlayer via window event
+        if (ytId) {
+          window.dispatchEvent(new CustomEvent("syncwatch:remote-yt-sync", { detail: payload }));
+          return;
+        }
+
+        // Native HTML5 video player
         const video = videoRef.current;
         if (!video) return;
 
-        // If by any chance I am the host who sent this, ignore
-        if (isHostRef.current) return;
-
         const { currentTime, isPlaying, sentAt, action, sender } = payload;
-
-        // Calculate network transmission time (typically 20-50ms)
         const networkLag = Math.max(0, (Date.now() - sentAt) / 1000);
         const targetTime = isPlaying ? currentTime + networkLag : currentTime;
 
-        // Sync playback position
         const timeDiff = Math.abs(video.currentTime - targetTime);
 
-        // Only seek if difference is noticeable (> 150ms) to avoid micro-stuttering
         if (timeDiff > 0.15 || action === "SEEK" || action === "RESTART") {
           video.currentTime = targetTime;
         }
 
-        // Sync playback state
         if (isPlaying && video.paused) {
           video.play().catch(console.error);
         } else if (!isPlaying && !video.paused) {
           video.pause();
         }
 
-        // Add system message on seek/restart if needed
         if (action === "RESTART") {
           setMessages((prev) => [
             ...prev,
@@ -212,6 +230,25 @@ function normalizeMediaUrl(url: string): string {
             },
           ]);
         }
+      })
+
+      // Video Change Broadcast
+      .on("broadcast", { event: "change-video" }, ({ payload }: { payload: { videoUrl: string; sender: string } }) => {
+        const norm = normalizeMediaUrl(payload.videoUrl);
+        setVideoUrl(norm);
+        sessionStorage.setItem("syncwatch_video_url", norm);
+
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `change-${Date.now()}`,
+            sender: "Sistema",
+            text: `🎬 ${payload.sender} cambió el video de la sala.`,
+            isHost: false,
+            isSystem: true,
+            timestamp: Date.now(),
+          },
+        ]);
       })
 
       // Live Chat Broadcast
@@ -232,7 +269,7 @@ function normalizeMediaUrl(url: string): string {
     };
   }, [handlePresenceUpdate, router]);
 
-  // Host Action Handler: Broadcasts immediately (< 50ms)
+  // Host Action Handler
   const handleHostSync = useCallback((payload: SyncPayload) => {
     if (!isHostRef.current) return;
 
@@ -245,7 +282,6 @@ function normalizeMediaUrl(url: string): string {
       },
     });
 
-    // Optionally notify chat of major actions
     if (payload.action === "SEEK") {
       const timeStr = formatTimeShort(payload.currentTime);
       const systemMsg: ChatMessage = {
@@ -265,7 +301,50 @@ function normalizeMediaUrl(url: string): string {
     }
   }, []);
 
-  // Claim Host role if available
+  // Host Change Video Function
+  const handleChangeVideoSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newVideoInput.trim()) return;
+
+    const newUrl = normalizeMediaUrl(newVideoInput.trim());
+    setVideoUrl(newUrl);
+    sessionStorage.setItem("syncwatch_video_url", newUrl);
+    setNewVideoInput("");
+    setShowChangeVideoModal(false);
+
+    // Save to DB
+    const storedRoomId = sessionStorage.getItem("syncwatch_room_id");
+    if (storedRoomId) {
+      try {
+        await getSupabase().from("rooms").update({ video_url: newUrl }).eq("id", storedRoomId);
+      } catch {
+        // ignore
+      }
+    }
+
+    // Broadcast to room
+    channelRef.current?.send({
+      type: "broadcast",
+      event: "change-video",
+      payload: {
+        videoUrl: newUrl,
+        sender: username,
+      },
+    });
+
+    // System announcement
+    const changeNotice: ChatMessage = {
+      id: `change-${Date.now()}`,
+      sender: "Sistema",
+      text: `👑 ${username} cambió el video a: ${newUrl}`,
+      isHost: false,
+      isSystem: true,
+      timestamp: Date.now(),
+    };
+    setMessages((prev) => [...prev, changeNotice]);
+  };
+
+  // Claim Host role
   const handleClaimHost = useCallback(async () => {
     const hasAnyHost = participants.some((p) => p.isHost && p.name !== username);
     if (hasAnyHost) return;
@@ -321,10 +400,8 @@ function normalizeMediaUrl(url: string): string {
         timestamp: Date.now(),
       };
 
-      // Add locally immediately
       setMessages((prev) => [...prev, newMsg]);
 
-      // Broadcast to others
       channelRef.current?.send({
         type: "broadcast",
         event: "chat-message",
@@ -350,6 +427,8 @@ function normalizeMediaUrl(url: string): string {
     );
   }
 
+  const youtubeVideoId = getYouTubeId(videoUrl);
+
   return (
     <div className="min-h-screen bg-black text-white flex flex-col selection:bg-purple-500 selection:text-white">
       {/* Top Header */}
@@ -366,7 +445,20 @@ function normalizeMediaUrl(url: string): string {
           </span>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 sm:gap-3">
+          {/* Host Change Video Button */}
+          {isHost && (
+            <button
+              type="button"
+              onClick={() => setShowChangeVideoModal(!showChangeVideoModal)}
+              className="px-3 py-1.5 rounded-xl bg-purple-600/30 hover:bg-purple-600/50 border border-purple-500/40 text-purple-200 text-xs font-semibold transition-all flex items-center gap-1.5 shadow-sm"
+              title="Cambiar video (YouTube o MP4)"
+            >
+              <span>🔗</span>
+              <span className="hidden sm:inline">Cambiar Video</span>
+            </button>
+          )}
+
           {/* Role badge */}
           {isHost ? (
             <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-yellow-500/10 border border-yellow-500/30 text-yellow-300 text-xs font-semibold shadow-sm shadow-yellow-500/10">
@@ -383,7 +475,7 @@ function normalizeMediaUrl(url: string): string {
           {/* User badge */}
           <div className="flex items-center gap-2 pl-2 border-l border-white/10 text-xs text-zinc-300">
             <span className="w-2 h-2 rounded-full bg-green-500" />
-            <span className="font-medium truncate max-w-[120px]">{username}</span>
+            <span className="font-medium truncate max-w-[100px] sm:max-w-[120px]">{username}</span>
           </div>
 
           {/* Exit Button */}
@@ -400,18 +492,62 @@ function normalizeMediaUrl(url: string): string {
         </div>
       </header>
 
+      {/* Host Change Video Floating Modal/Bar */}
+      {showChangeVideoModal && isHost && (
+        <div className="bg-purple-950/40 border-b border-purple-500/30 px-4 py-3 backdrop-blur-xl animate-in slide-in-from-top duration-200 z-30">
+          <form
+            onSubmit={handleChangeVideoSubmit}
+            className="max-w-4xl mx-auto flex flex-col sm:flex-row items-center gap-2"
+          >
+            <div className="flex-1 w-full">
+              <input
+                type="text"
+                value={newVideoInput}
+                onChange={(e) => setNewVideoInput(e.target.value)}
+                placeholder="Pega un link de YouTube (ej: https://youtu.be/...) o video MP4..."
+                className="w-full px-3.5 py-2 bg-black/60 border border-white/20 rounded-xl text-xs sm:text-sm text-white placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-purple-400"
+                autoFocus
+              />
+            </div>
+            <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+              <button
+                type="submit"
+                className="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-xs sm:text-sm font-bold transition-all shadow-md shrink-0"
+              >
+                Cargar para Todos 🚀
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowChangeVideoModal(false)}
+                className="px-3 py-2 bg-white/10 hover:bg-white/20 text-zinc-300 rounded-xl text-xs sm:text-sm transition-all"
+              >
+                Cancelar
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       {/* Main Layout Area */}
       <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
         {/* Video Column */}
         <main className="flex-1 flex flex-col items-center justify-center p-3 sm:p-6 lg:p-8 bg-[#070707] overflow-y-auto">
           <div className="w-full max-w-5xl flex flex-col items-center gap-4">
-            <VideoPlayer
-              ref={videoRef}
-              src={videoUrl}
-              subtitlesUrl={subtitlesUrl}
-              isHost={isHost}
-              onHostSync={handleHostSync}
-            />
+            {youtubeVideoId ? (
+              <YouTubePlayer
+                videoId={youtubeVideoId}
+                isHost={isHost}
+                onHostSync={handleHostSync}
+              />
+            ) : (
+              <VideoPlayer
+                ref={videoRef}
+                src={videoUrl}
+                subtitlesUrl={subtitlesUrl}
+                isHost={isHost}
+                onHostSync={handleHostSync}
+              />
+            )}
 
             {/* Subtitle / Helper Info Bar */}
             <div className="w-full flex items-center justify-between text-xs text-zinc-500 px-2">
@@ -429,7 +565,7 @@ function normalizeMediaUrl(url: string): string {
                 )}
               </div>
               <p className="hidden sm:block text-zinc-600">
-                Atajos: Espacio (Play/Pausa) · J/L (±10s) · M (Mute) · F (Fullscreen)
+                Soporta links de YouTube y archivos directos MP4/Pixeldrain
               </p>
             </div>
           </div>
