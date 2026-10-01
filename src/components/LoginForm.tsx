@@ -26,12 +26,13 @@ export default function LoginForm() {
     try {
       const { data, error: dbError } = await getSupabase()
         .from("rooms")
-        .select("id, video_url, subtitles_url")
+        .select("*")
         .eq("password", password.trim())
         .single();
 
       if (dbError || !data) {
-        setError("Contraseña incorrecta");
+        console.error("Login Supabase error:", dbError);
+        setError("Contraseña incorrecta o error de conexión con Supabase");
         setLoading(false);
         return;
       }

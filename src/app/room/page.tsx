@@ -105,7 +105,7 @@ function normalizeMediaUrl(url: string): string {
     // Refresh room subtitles and video from DB if changed
     getSupabase()
       .from("rooms")
-      .select("video_url, subtitles_url")
+      .select("*")
       .eq("id", storedRoomId)
       .single()
       .then(
