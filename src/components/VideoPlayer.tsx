@@ -20,6 +20,7 @@ export interface SyncPayload {
 
 interface VideoPlayerProps {
   src: string;
+  subtitlesUrl?: string;
   isHost: boolean;
   onHostSync?: (payload: SyncPayload) => void;
 }
@@ -36,8 +37,16 @@ const formatTime = (seconds: number) => {
   return `${m}:${s.toString().padStart(2, "0")}`;
 };
 
+/** Convert SRT format to valid WebVTT format */
+function convertSrtToVtt(srtText: string): string {
+  let vtt = "WEBVTT\n\n" + srtText.replace(/\r\n|\r/g, "\n").trim();
+  // Replace comma millisecond separators with dots (e.g. 00:01:23,456 --> 00:01:23.456)
+  vtt = vtt.replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, "$1.$2");
+  return vtt;
+}
+
 const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
-  ({ src, isHost, onHostSync }, ref) => {
+  ({ src, subtitlesUrl, isHost, onHostSync }, ref) => {
     const videoRef = useRef<HTMLVideoElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const progressBarRef = useRef<HTMLDivElement>(null);
@@ -53,6 +62,12 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
     const [volume, setVolume] = useState(1);
     const [isMuted, setIsMuted] = useState(false);
     const [prevVolume, setPrevVolume] = useState(1);
+
+    // Subtitles state
+    const [vttBlobUrl, setVttBlobUrl] = useState<string | null>(null);
+    const [subtitlesEnabled, setSubtitlesEnabled] = useState(true);
+    const [hasSubtitles, setHasSubtitles] = useState(false);
+    const [isDragOver, setIsDragOver] = useState(false);
 
     // Seeking & Hover preview
     const [isDragging, setIsDragging] = useState(false);
@@ -81,6 +96,81 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
       [isHost, onHostSync]
     );
 
+    // Load & convert subtitles from Supabase URL (.srt or .vtt)
+    useEffect(() => {
+      let currentBlobUrl: string | null = null;
+
+      if (!subtitlesUrl) {
+        setHasSubtitles(false);
+        setVttBlobUrl(null);
+        return;
+      }
+
+      fetch(subtitlesUrl)
+        .then((res) => {
+          if (!res.ok) throw new Error("Error loading subtitles");
+          return res.text();
+        })
+        .then((rawText) => {
+          // If already WebVTT, use directly; otherwise convert from SRT
+          const isVtt = rawText.trim().startsWith("WEBVTT");
+          const vttContent = isVtt ? rawText : convertSrtToVtt(rawText);
+
+          const blob = new Blob([vttContent], { type: "text/vtt" });
+          currentBlobUrl = URL.createObjectURL(blob);
+          setVttBlobUrl(currentBlobUrl);
+          setHasSubtitles(true);
+          setSubtitlesEnabled(true);
+        })
+        .catch((err) => {
+          console.warn("Could not load subtitles file:", err);
+          setHasSubtitles(false);
+        });
+
+      return () => {
+        if (currentBlobUrl) {
+          URL.revokeObjectURL(currentBlobUrl);
+        }
+      };
+    }, [subtitlesUrl]);
+
+    // Handle dropping a local .srt file directly onto player
+    const handleFileDrop = (e: React.DragEvent) => {
+      e.preventDefault();
+      setIsDragOver(false);
+
+      if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        const file = e.dataTransfer.files[0];
+        if (file.name.endsWith(".srt") || file.name.endsWith(".vtt")) {
+          const reader = new FileReader();
+          reader.onload = (event) => {
+            const content = event.target?.result as string;
+            const isVtt = content.trim().startsWith("WEBVTT");
+            const vttContent = isVtt ? content : convertSrtToVtt(content);
+            const blob = new Blob([vttContent], { type: "text/vtt" });
+            const url = URL.createObjectURL(blob);
+            setVttBlobUrl(url);
+            setHasSubtitles(true);
+            setSubtitlesEnabled(true);
+          };
+          reader.readAsText(file);
+        }
+      }
+    };
+
+    // Toggle subtitles visibility [CC]
+    const handleToggleSubtitles = useCallback(() => {
+      const video = videoRef.current;
+      const nextState = !subtitlesEnabled;
+      setSubtitlesEnabled(nextState);
+
+      if (video && video.textTracks && video.textTracks.length > 0) {
+        for (let i = 0; i < video.textTracks.length; i++) {
+          video.textTracks[i].mode = nextState ? "showing" : "hidden";
+        }
+      }
+    }, [subtitlesEnabled]);
+
     // Trigger ripple animation
     const triggerRipple = (type: "play" | "pause" | "replay") => {
       setRippleIcon(type);
@@ -108,23 +198,28 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
       if (!isHost) return;
 
       if (video.ended || video.currentTime >= video.duration - 0.2) {
-        // Reiniciar desde el principio
         video.currentTime = 0;
-        video.play().then(() => {
-          setIsEnded(false);
-          setIsPlaying(true);
-          triggerRipple("replay");
-          broadcastSync("RESTART", 0, true);
-        }).catch(console.error);
+        video
+          .play()
+          .then(() => {
+            setIsEnded(false);
+            setIsPlaying(true);
+            triggerRipple("replay");
+            broadcastSync("RESTART", 0, true);
+          })
+          .catch(console.error);
         return;
       }
 
       if (video.paused) {
-        video.play().then(() => {
-          setIsPlaying(true);
-          triggerRipple("play");
-          broadcastSync("PLAY", video.currentTime, true);
-        }).catch(console.error);
+        video
+          .play()
+          .then(() => {
+            setIsPlaying(true);
+            triggerRipple("play");
+            broadcastSync("PLAY", video.currentTime, true);
+          })
+          .catch(console.error);
       } else {
         video.pause();
         setIsPlaying(false);
@@ -133,7 +228,7 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
       }
     }, [isHost, broadcastSync]);
 
-    // Handle skip forward / backward
+    // Skip forward / backward
     const handleSkip = useCallback(
       (seconds: number) => {
         const video = videoRef.current;
@@ -147,7 +242,7 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
       [isHost, broadcastSync]
     );
 
-    // Handle Fullscreen
+    // Fullscreen toggle
     const handleFullscreen = useCallback(() => {
       const container = containerRef.current;
       if (!container) return;
@@ -159,7 +254,7 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
       }
     }, []);
 
-    // Handle Volume change
+    // Volume change
     const handleVolumeChange = (newVolume: number) => {
       const video = videoRef.current;
       if (!video) return;
@@ -170,7 +265,7 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
       setIsMuted(vol === 0);
     };
 
-    const handleToggleMute = () => {
+    const handleToggleMute = useCallback(() => {
       const video = videoRef.current;
       if (!video) return;
 
@@ -187,9 +282,9 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
         setVolume(0);
         setIsMuted(true);
       }
-    };
+    }, [isMuted, volume, prevVolume]);
 
-    // Calculate time from mouse position on progress bar
+    // Calculate time from mouse position
     const calculateTimeFromEvent = (e: MouseEvent | TouchEvent | React.MouseEvent) => {
       if (!progressBarRef.current || !duration) return 0;
       const rect = progressBarRef.current.getBoundingClientRect();
@@ -242,7 +337,7 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
         try {
           (e.target as HTMLElement).releasePointerCapture(e.pointerId);
         } catch {
-          // pointer capture might already be released
+          // ignore
         }
 
         const video = videoRef.current;
@@ -255,7 +350,7 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
       }
     };
 
-    // Attach native video listeners
+    // Native video listeners
     useEffect(() => {
       const video = videoRef.current;
       if (!video) return;
@@ -316,7 +411,6 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
     // Keyboard Shortcuts
     useEffect(() => {
       const onKeyDown = (e: KeyboardEvent) => {
-        // Ignore if user is typing in chat or input
         const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
         if (tag === "input" || tag === "textarea") return;
 
@@ -335,12 +429,15 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
         } else if (e.key === "f" || e.key === "F") {
           e.preventDefault();
           handleFullscreen();
+        } else if (e.key === "c" || e.key === "C") {
+          e.preventDefault();
+          handleToggleSubtitles();
         }
       };
 
       window.addEventListener("keydown", onKeyDown);
       return () => window.removeEventListener("keydown", onKeyDown);
-    }, [isHost, handleTogglePlay, handleSkip, handleToggleMute, handleFullscreen]);
+    }, [isHost, handleTogglePlay, handleSkip, handleToggleMute, handleFullscreen, handleToggleSubtitles]);
 
     const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
     const bufferPercent = duration > 0 ? (bufferedEnd / duration) * 100 : 0;
@@ -350,20 +447,48 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
         ref={containerRef}
         onMouseMove={resetControlsTimer}
         onMouseEnter={() => setShowControls(true)}
-        className="w-full max-w-5xl aspect-video bg-black rounded-2xl overflow-hidden shadow-2xl shadow-purple-500/10 ring-1 ring-white/10 relative group select-none flex items-center justify-center"
+        onDragOver={(e) => {
+          e.preventDefault();
+          setIsDragOver(true);
+        }}
+        onDragLeave={() => setIsDragOver(false)}
+        onDrop={handleFileDrop}
+        className={`w-full max-w-5xl aspect-video bg-black rounded-2xl overflow-hidden shadow-2xl shadow-purple-500/10 ring-1 ring-white/10 relative group select-none flex items-center justify-center transition-all ${
+          isDragOver ? "ring-2 ring-purple-500 bg-purple-950/20" : ""
+        }`}
       >
         <video
           ref={videoRef}
           src={src}
           preload="auto"
           playsInline
+          crossOrigin="anonymous"
           onClick={isHost ? handleTogglePlay : undefined}
           className={`w-full h-full object-contain bg-black ${
             isHost ? "cursor-pointer" : "cursor-default"
           }`}
-        />
+        >
+          {vttBlobUrl && (
+            <track
+              label="Español"
+              kind="subtitles"
+              srcLang="es"
+              src={vttBlobUrl}
+              default={subtitlesEnabled}
+            />
+          )}
+        </video>
 
-        {/* Center Ripple Feedback (YouTube-like) */}
+        {/* Drag & Drop Feedback Overlay */}
+        {isDragOver && (
+          <div className="absolute inset-0 bg-purple-900/60 backdrop-blur-sm flex flex-col items-center justify-center text-white z-50 pointer-events-none">
+            <span className="text-4xl mb-2">📄</span>
+            <p className="font-bold text-lg">Suelta tu archivo .srt aquí</p>
+            <p className="text-xs text-purple-200">Se cargarán los subtítulos en español</p>
+          </div>
+        )}
+
+        {/* Center Ripple Feedback */}
         {rippleIcon && (
           <div className="absolute pointer-events-none w-20 h-20 rounded-full bg-black/60 backdrop-blur-md flex items-center justify-center animate-ping text-white z-40">
             {rippleIcon === "play" && (
@@ -402,6 +527,12 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
                 </span>
               </div>
             )}
+
+            {hasSubtitles && (
+              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-purple-500/20 border border-purple-500/30 text-purple-300 text-xs backdrop-blur-md">
+                <span>💬 Subtítulos ES</span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -423,7 +554,7 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
               isHost ? "cursor-pointer" : "cursor-default"
             }`}
           >
-            {/* Hover Tooltip (Time indicator) */}
+            {/* Hover Tooltip */}
             {isHost && hoverTime !== null && (
               <div
                 className="absolute -top-7 transform -translate-x-1/2 px-2 py-0.5 rounded bg-black/90 border border-white/20 text-[11px] font-mono text-white pointer-events-none z-40 whitespace-nowrap shadow-lg"
@@ -462,7 +593,7 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
           {/* Control Buttons Row */}
           <div className="px-4 pb-3 pt-1 flex items-center justify-between text-white">
             <div className="flex items-center gap-3 sm:gap-4">
-              {/* Play / Pause / Replay Button */}
+              {/* Play / Pause / Replay */}
               {isHost ? (
                 <button
                   type="button"
@@ -524,7 +655,7 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
                 </>
               )}
 
-              {/* Volume Slider (Local for everyone) */}
+              {/* Volume Slider */}
               <div className="flex items-center gap-2 group/vol">
                 <button
                   type="button"
@@ -567,7 +698,23 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
             </div>
 
             {/* Right Controls */}
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2 sm:gap-3">
+              {/* Subtitles Button [CC] */}
+              {hasSubtitles && (
+                <button
+                  type="button"
+                  onClick={handleToggleSubtitles}
+                  title={`Subtítulos: ${subtitlesEnabled ? "Activados" : "Desactivados"} (C)`}
+                  className={`px-2 py-1 rounded text-xs font-bold font-mono transition-all flex items-center justify-center ${
+                    subtitlesEnabled
+                      ? "bg-red-600 text-white shadow-sm shadow-red-600/30"
+                      : "text-zinc-400 hover:text-white hover:bg-white/10"
+                  }`}
+                >
+                  CC
+                </button>
+              )}
+
               {/* Fullscreen Button */}
               <button
                 type="button"

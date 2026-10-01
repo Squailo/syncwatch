@@ -9,7 +9,7 @@ body {
   color: #ededed;
 }
 
-/* Hide default video controls when not playing */
+/* Hide default video controls */
 video::-webkit-media-controls {
   opacity: 0;
   transition: opacity 0.3s;
@@ -17,6 +17,19 @@ video::-webkit-media-controls {
 
 video:hover::-webkit-media-controls {
   opacity: 1;
+}
+
+/* YouTube-like Subtitles Styling */
+video::cue {
+  background-color: rgba(0, 0, 0, 0.85);
+  color: #ffffff;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-size: 1.15rem;
+  font-weight: 600;
+  line-height: 1.4;
+  padding: 4px 8px;
+  border-radius: 4px;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95);
 }
 
 /* Custom scrollbar */

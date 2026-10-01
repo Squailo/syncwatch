@@ -26,7 +26,7 @@ export default function LoginForm() {
     try {
       const { data, error: dbError } = await getSupabase()
         .from("rooms")
-        .select("id, video_url")
+        .select("id, video_url, subtitles_url")
         .eq("password", password.trim())
         .single();
 
@@ -38,6 +38,11 @@ export default function LoginForm() {
 
       sessionStorage.setItem("syncwatch_username", username.trim());
       sessionStorage.setItem("syncwatch_video_url", data.video_url);
+      if (data.subtitles_url) {
+        sessionStorage.setItem("syncwatch_subtitles_url", data.subtitles_url);
+      } else {
+        sessionStorage.removeItem("syncwatch_subtitles_url");
+      }
       sessionStorage.setItem("syncwatch_room_id", data.id);
       sessionStorage.setItem("syncwatch_wants_host", wantsHost ? "true" : "false");
 

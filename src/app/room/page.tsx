@@ -20,6 +20,7 @@ export default function RoomPage() {
   const router = useRouter();
   const [username, setUsername] = useState<string>("");
   const [videoUrl, setVideoUrl] = useState<string>("");
+  const [subtitlesUrl, setSubtitlesUrl] = useState<string>("");
   const [isHost, setIsHost] = useState(false);
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -90,8 +91,38 @@ export default function RoomPage() {
       return;
     }
 
+function normalizeMediaUrl(url: string): string {
+  if (!url) return "";
+  return url.trim().replace(/pixeldrain\.com\/u\/([a-zA-Z0-9_-]+)/i, "pixeldrain.com/api/file/$1");
+}
+
     setUsername(storedUsername);
-    setVideoUrl(storedVideoUrl);
+    setVideoUrl(normalizeMediaUrl(storedVideoUrl));
+
+    const storedSubtitlesUrl = sessionStorage.getItem("syncwatch_subtitles_url") || "";
+    setSubtitlesUrl(normalizeMediaUrl(storedSubtitlesUrl));
+
+    // Refresh room subtitles and video from DB if changed
+    getSupabase()
+      .from("rooms")
+      .select("video_url, subtitles_url")
+      .eq("id", storedRoomId)
+      .single()
+      .then(
+        ({ data }) => {
+          if (data?.video_url) {
+            const normVideo = normalizeMediaUrl(data.video_url);
+            setVideoUrl(normVideo);
+            sessionStorage.setItem("syncwatch_video_url", normVideo);
+          }
+          if (data?.subtitles_url) {
+            const normSub = normalizeMediaUrl(data.subtitles_url);
+            setSubtitlesUrl(normSub);
+            sessionStorage.setItem("syncwatch_subtitles_url", normSub);
+          }
+        },
+        () => {}
+      );
 
     // Initial default message
     setMessages([
@@ -377,6 +408,7 @@ export default function RoomPage() {
             <VideoPlayer
               ref={videoRef}
               src={videoUrl}
+              subtitlesUrl={subtitlesUrl}
               isHost={isHost}
               onHostSync={handleHostSync}
             />
