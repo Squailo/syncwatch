@@ -106,7 +106,9 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
         return;
       }
 
-      fetch(subtitlesUrl)
+      const targetUrl = subtitlesUrl.trim().replace(/pixeldrain\.com\/u\/([a-zA-Z0-9_-]+)/i, "pixeldrain.com/api/file/$1");
+
+      fetch(targetUrl)
         .then((res) => {
           if (!res.ok) throw new Error("Error loading subtitles");
           return res.text();
@@ -441,6 +443,7 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
 
     const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
     const bufferPercent = duration > 0 ? (bufferedEnd / duration) * 100 : 0;
+    const normalizedSrc = src ? src.trim().replace(/pixeldrain\.com\/u\/([a-zA-Z0-9_-]+)/i, "pixeldrain.com/api/file/$1") : "";
 
     return (
       <div
@@ -459,7 +462,7 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
       >
         <video
           ref={videoRef}
-          src={src}
+          src={normalizedSrc}
           preload="auto"
           playsInline
           crossOrigin="anonymous"
