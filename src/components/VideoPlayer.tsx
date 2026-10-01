@@ -106,7 +106,10 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
         return;
       }
 
-      const targetUrl = subtitlesUrl.trim().replace(/pixeldrain\.com\/u\/([a-zA-Z0-9_-]+)/i, "pixeldrain.com/api/file/$1");
+      const cleanSubUrl = subtitlesUrl.trim().replace(/pixeldrain\.com\/u\/([a-zA-Z0-9_-]+)/i, "pixeldrain.com/api/file/$1");
+      const targetUrl = cleanSubUrl.includes("pixeldrain.com")
+        ? `/api/proxy?url=${encodeURIComponent(cleanSubUrl)}`
+        : cleanSubUrl;
 
       fetch(targetUrl)
         .then((res) => {
@@ -443,7 +446,10 @@ const VideoPlayer = forwardRef<HTMLVideoElement, VideoPlayerProps>(
 
     const progressPercent = duration > 0 ? (currentTime / duration) * 100 : 0;
     const bufferPercent = duration > 0 ? (bufferedEnd / duration) * 100 : 0;
-    const normalizedSrc = src ? src.trim().replace(/pixeldrain\.com\/u\/([a-zA-Z0-9_-]+)/i, "pixeldrain.com/api/file/$1") : "";
+    const cleanVideoUrl = src ? src.trim().replace(/pixeldrain\.com\/u\/([a-zA-Z0-9_-]+)/i, "pixeldrain.com/api/file/$1") : "";
+    const normalizedSrc = cleanVideoUrl.includes("pixeldrain.com")
+      ? `/api/proxy?url=${encodeURIComponent(cleanVideoUrl)}`
+      : cleanVideoUrl;
 
     return (
       <div
